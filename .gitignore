@@ -15,7 +15,7 @@ log.txt
 Pipfile.lock
 env3.*
 env
-.env
+.venv
 docs_build
 site_build
 venv
@@ -31,3 +31,5 @@ archive.zip
 .DS_Store
 
 .codspeed
+
+.env
