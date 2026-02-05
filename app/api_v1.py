@@ -1,3 +1,4 @@
+import base64 as b64_module
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -118,3 +119,42 @@ async def get_brand_images(brand_name: str):
     # The same 'imagekit' instance is used here
     list_files = imagekit.assets.list(path=f"/{brand_name}/", file_type="image")
     return {"images": [f.url for f in list_files]}
+
+@router.post("/explore/breed_styles_with_map")
+async def breed_styles(request: BreedRequest):
+    # 1. Load DNA and Breed
+    path_a = f"data/centroids/{request.brand_a}.npy"
+    path_b = f"data/centroids/{request.brand_b}.npy"
+
+    if not os.path.exists(path_a) or not os.path.exists(path_b):
+        raise HTTPException(status_code=404, detail="DNA files missing.")
+
+    dna_a, dna_b = np.load(path_a), np.load(path_b)
+    new_dna = brain.breed_dna(dna_a, dna_b, request.mix_ratio)
+
+    # 2. Generate the Fashion Design
+    design_buffer = brain.generate_design(new_dna)
+    
+    # 3. Generate the Lineage Map (using the function we built)
+    map_filename = f"map_{request.brand_a}_{request.brand_b}_{request.mix_ratio}.png"
+    # Assuming 'save_breeding_map' returns a BytesIO object for memory efficiency
+    map_buffer = brain.generate_breeding_map(
+        request.brand_a, 
+        request.brand_b, 
+        request.mix_ratio,
+        filename=map_filename
+    )
+
+    # 4. Encode to Base64 (to send in one JSON package)
+    def to_b64(buffer):
+        return b64_module.b64encode(buffer.getvalue()).decode('utf-8')
+
+    return {
+        "metadata": {
+            "parent_a": request.brand_a,
+            "parent_b": request.brand_b,
+            "ratio": request.mix_ratio
+        },
+        "design_image": f"data:image/png;base64,{to_b64(design_buffer)}",
+        "lineage_map": f"data:image/png;base64,{to_b64(map_buffer)}"
+    }
