@@ -6,9 +6,9 @@ import requests
 from io import BytesIO
 from PIL import Image
 import fashion_clip.fashion_clip as fc_module
-from imagekitio import ImageKit
 import torch
 from tqdm import tqdm
+from app.config.imagekit_config import imagekit
 
 # --- 2026 COMPATIBILITY PATCH (Must match brain.py) ---
 def patched_load_model(self, name, auth_token=None):
@@ -58,13 +58,6 @@ fc_module.FashionCLIP._load_model = patched_load_model
 fc_module.FashionCLIP.encode_images = patched_encode_images
 from fashion_clip.fashion_clip import FashionCLIP
 # -----------------------------------------------------
-
-# --- INITIALIZE IMAGEKIT ---
-imagekit = ImageKit(
-    private_key=os.environ.get('IMAGEKIT_PRIVATE_KEY'),
-    #public_key=os.environ.get('IMAGEKIT_PUBLIC_KEY'),
-    # base_url=os.environ.get('IMAGEKIT_BASE_URL')
-)
 
 def get_remote_image_urls(folder_path):
     """Lists images and verifies folder content using v4 SDK."""

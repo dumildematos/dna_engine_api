@@ -35,6 +35,10 @@ dna_engine/
 3. Initialize DNAPlace your images in data/raw/prada/, etc., and run the extractor:Bashpython extract_dna.py
 4. Run the EngineBash fastapi dev app/main.py
 
+```sh
+
+```
+
 # 🧬 How Breeding Works
 
 The engine operates on the principle of Latent Space Interpolation. When you request a 50/50 mix, the engine performs the following:Retrieval: Loads the 512-d vectors $V_a$ and $V_b$.Mixing: Calculates $V_{new} = (1 - \text{ratio})V_a + (\text{ratio})V_b$.Refinement: Normalizes $V_{new}$ to ensure it stays within the "Fashion Manifold."Generation: Injects the resulting vector into the Stable Diffusion pipeline as a stylistic seed.

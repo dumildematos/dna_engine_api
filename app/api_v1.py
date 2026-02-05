@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import numpy as np
 import os
 from .brain import brain
+from config.imagekit_config import imagekit
 
 router = APIRouter()
 
@@ -111,3 +112,9 @@ async def get_lineage(brand_a: str, brand_b: str):
         "parent_a": load_meta(brand_a),
         "parent_b": load_meta(brand_b)
     }
+
+@router.get("/explore/brands/{brand_name}/images")
+async def get_brand_images(brand_name: str):
+    # The same 'imagekit' instance is used here
+    list_files = imagekit.assets.list(path=f"/{brand_name}/", file_type="image")
+    return {"images": [f.url for f in list_files]}
