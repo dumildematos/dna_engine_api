@@ -1,126 +1,159 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
+import json
 import numpy as np
 import requests
+import torch
 from io import BytesIO
 from PIL import Image
-import fashion_clip.fashion_clip as fc_module
-import torch
 from tqdm import tqdm
-from app.config.imagekit_config import imagekit
+from dotenv import load_dotenv
 
-# --- 2026 COMPATIBILITY PATCH (Must match brain.py) ---
+# Import the shared ImageKit config
+from config.imagekit_config import imagekit
+import fashion_clip.fashion_clip as fc_module
+
+load_dotenv()
+
+# --- 2026 COMPATIBILITY PATCH ---
 def patched_load_model(self, name, auth_token=None):
     from transformers import CLIPModel, CLIPProcessor
     actual_repo = "patrickjohncyh/fashion-clip"
-    print(f"--- Patching: Loading weights from {actual_repo} ---")
-    # Force return_dict=True to ensure we get a consistent object format
     model = CLIPModel.from_pretrained(actual_repo, token=auth_token, return_dict=True)
     preprocess = CLIPProcessor.from_pretrained(actual_repo, token=auth_token)
     return model, preprocess, None
 
 def patched_encode_images(self, images, batch_size=16):
-    """
-    Manually extracts embeddings from modern Transformers output containers.
-    """
     image_embeddings = []
-    # Set model to eval mode for consistency
     self.model.eval()
-    
     for i in tqdm(range(0, len(images), batch_size), desc="Encoding DNA"):
         batch_images = images[i : i + batch_size]
-        # Preprocess and move to correct device (CPU or CUDA)
         inputs = self.preprocess(images=batch_images, return_tensors="pt").to(self.model.device)
-        
         with torch.no_grad():
             outputs = self.model.get_image_features(**inputs)
+            features = getattr(outputs, "image_embeds", getattr(outputs, "pooler_output", outputs))
+            if not isinstance(features, torch.Tensor): features = features[0]
+            image_embeddings.extend(features.detach().cpu().numpy())
+    return np.array(image_embeddings)
+
+def patched_encode_text(self, text, batch_size=16):
+    """Aggressively unwraps the model output to find the 512D tensor."""
+    text_embeddings = []
+    self.model.eval()
+    
+    for i in tqdm(range(0, len(text), batch_size), desc="Encoding Traits"):
+        batch_text = text[i : i + batch_size]
+        inputs = self.preprocess(text=batch_text, return_tensors="pt", padding=True).to(self.model.device)
+        
+        with torch.no_grad():
+            outputs = self.model.get_text_features(**inputs)
             
-            # --- CRITICAL FIX START ---
-            # 1. Try 'image_embeds' (standard for CLIPModel)
-            if hasattr(outputs, "image_embeds"):
-                features = outputs.image_embeds
-            # 2. Try 'pooler_output' (standard for many vision models)
+            # --- AGGRESSIVE UNWRAPPING ---
+            # We look for the tensor in every possible hiding place
+            if isinstance(outputs, torch.Tensor):
+                features = outputs
+            elif hasattr(outputs, "text_embeds"):
+                features = outputs.text_embeds
             elif hasattr(outputs, "pooler_output"):
                 features = outputs.pooler_output
-            # 3. Fallback to indexing if it's a tuple-like object
             elif isinstance(outputs, (list, tuple)):
                 features = outputs[0]
             else:
-                features = outputs
-            # --- CRITICAL FIX END ---
-                
-            image_embeddings.extend(features.detach().cpu().numpy())
+                # Last resort: try to force cast or access the first attribute
+                features = next(iter(outputs.values())) if hasattr(outputs, "values") else outputs
+
+            # Now that we (hopefully) have a tensor, normalize it
+            # We use torch.linalg.norm for better compatibility in 2026
+            norm = features.norm(p=2, dim=-1, keepdim=True)
+            features = features / norm
             
-    return np.array(image_embeddings)
-# Apply patch to the module before class instantiation
+            text_embeddings.extend(features.detach().cpu().numpy())
+            
+    return np.array(text_embeddings)
+
+# Re-apply the patch
+fc_module.FashionCLIP.encode_text = patched_encode_text
 fc_module.FashionCLIP._load_model = patched_load_model
 fc_module.FashionCLIP.encode_images = patched_encode_images
+
 from fashion_clip.fashion_clip import FashionCLIP
-# -----------------------------------------------------
+
+# --- ARCHIVIST VOCABULARY ---
+FASHION_TRAITS = [
+    "quilted texture", "minimalist lines", "avant-garde silhouette",
+    "industrial nylon", "architectural tailoring", "organic curves",
+    "monogram print", "tweed fabric", "distressed leather",
+    "structured shoulders", "flowing silk", "utility hardware"
+]
 
 def get_remote_image_urls(folder_path):
-    """Lists images and verifies folder content using v4 SDK."""
     print(f"🔍 Checking ImageKit folder: {folder_path}...")
-    
     try:
-        # Correct v4 list method: imagekit.list_assets or imagekit.files.list
-        response = imagekit.assets.list(
-            path=folder_path,
-            file_type="image")
+        # v4 SDK uses .assets.list
+        response = imagekit.assets.list(path=folder_path, file_type="image")
+        if not response: return []
+        print(f"✅ Found {len(response)} images.")
+        return [f"{f.url}?tr=w-512,h-512,cm-pad_resize" for f in response]
     except Exception as e:
-        print(f"⚠️ SDK Method issue: {e}. Trying fallback...")
-        response = imagekit.assets.list(
-            path=folder_path,
-            file_type="image")
-
-    if not response:
-        print(f"❌ ERROR: No images found in '{folder_path}'.")
+        print(f"❌ SDK Error: {e}")
         return []
 
-    print(f"✅ Found {len(response)} images in '{folder_path}'.")
-    # Transform to 512x512 square for optimal Fashion-CLIP processing
-    return [f"{f.url}?tr=w-512,h-512,cm-pad_resize" for f in response]
-
 def extract_brand_dna_cloud(brand_name):
-    print(f"🧬 Processing Brand: {brand_name.upper()}")
+    print(f"🧬 ARCHIVING BRAND: {brand_name.upper()}")
     
-    # 1. Get URLs from ImageKit
-    folder_path = f"/{brand_name}/"
-    urls = get_remote_image_urls(folder_path)
-    
-    if not urls:
-        return
+    urls = get_remote_image_urls(f"/{brand_name}/")
+    if not urls: return
 
-    # 2. Download images into memory
     pil_images = []
     for url in urls:
         try:
             res = requests.get(url, timeout=10)
-            img = Image.open(BytesIO(res.content)).convert("RGB")
-            pil_images.append(img)
-        except Exception as e:
-            print(f"   ⚠️ Failed to load {url}: {e}")
+            pil_images.append(Image.open(BytesIO(res.content)).convert("RGB"))
+        except: continue
 
-    # 3. Calculate DNA with patched Fashion-CLIP
-    # We pass 'fashion-clip' but our patch redirects it correctly
+    # 1. Initialize FashionCLIP
     fclip = FashionCLIP("fashion-clip")
+    
+    # 2. Extract Individual Image Embeddings
+    # Shape: (Number of Images, 512)
     embeddings = fclip.encode_images(pil_images, batch_size=16)
     
+    # Calculate the Centroid (The average DNA for breeding)
     brand_dna = np.mean(embeddings, axis=0)
     brand_dna /= np.linalg.norm(brand_dna)
 
-    # 4. Save the DNA locally
-    output_path = f"data/centroids/{brand_name}.npy"
+    # 3. Extract Heritage Traits (The "AI Archivist" Logic)
+    # Shape: (Number of Traits, 512)
+    text_embeddings = fclip.encode_text(FASHION_TRAITS, batch_size=32)
+
+    # --- CRITICAL ALIGNMENT FIX ---
+    # We want to know how much each image (N, 512) matches each trait (M, 512)
+    # Resulting similarity shape: (N images, M traits)
+    similarity = np.matmul(embeddings, text_embeddings.T)
+
+    # Average the similarities across all images to find brand-wide strengths
+    avg_scores = similarity.mean(axis=0)
+    
+    # Rank and pick the top 3
+    top_indices = avg_scores.argsort()[-3:][::-1]
+    dominant_traits = [FASHION_TRAITS[i] for i in top_indices]
+
+    # 4. Save DNA (.npy)
     os.makedirs("data/centroids", exist_ok=True)
-    np.save(output_path, brand_dna)
-    print(f"✅ DNA saved to {output_path}\n")
+    np.save(f"data/centroids/{brand_name}.npy", brand_dna)
+
+    # 5. Save Heritage Metadata (.json)
+    heritage_data = {
+        "brand": brand_name,
+        "traits": dominant_traits,
+        "image_count": len(pil_images),
+        "archived_at": "2026-02-05"
+    }
+    with open(f"data/centroids/{brand_name}.json", "w") as f:
+        json.dump(heritage_data, f, indent=4)
+
+    print(f"✅ DNA Saved. Traits identified: {', '.join(dominant_traits)}\n")
 
 if __name__ == "__main__":
-    # Ensure your ImageKit folders match these exactly (lowercase)
-    brands = ["dior", "prada"]
-
-
-    
+    brands = ["valentino","rick_owens","dior","off_white","hermes","gucci","chanel","balenciaga","versace","prada"]
     for b in brands:
         extract_brand_dna_cloud(b)

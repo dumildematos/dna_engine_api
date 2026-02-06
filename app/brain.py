@@ -129,24 +129,118 @@ class StyleBrain:
             print("--- Engine Ready! ---")
         return pipe
 
-    def generate_design(self, bred_dna: np.ndarray):
+    def generate_design(self, bred_dna: np.ndarray, custom_prompt: str = ""):
         generator = self.load_generator()
+        
+        # 1. Deterministic Seed from DNA
+        # This ensures the 'DNA' actually dictates the core structure
         seed = int(np.abs(bred_dna.sum()) * 1000000) % 2**32
         latents_generator = torch.Generator(device=self.device).manual_seed(seed)
         
-        prompt = "high fashion runway look, avant-garde garment, detailed texture, professional photography, masterpiece"
+        # 2. Archivist Prompt Integration
+        # We combine your high-quality base prompt with the specific heritage traits
+        base_style = "high fashion runway look, avant-garde garment, detailed texture, professional photography, masterpiece"
         
+        if custom_prompt:
+            # Heritage traits take priority at the front of the prompt
+            final_prompt = f"{custom_prompt}, {base_style}"
+        else:
+            final_prompt = base_style
+        
+        print(f"🎨 Lab Generating: {final_prompt}")
+
+        # 3. Image Generation
         image = generator(
-            prompt, 
+            final_prompt, 
             num_inference_steps=20 if self.device == "cpu" else 25, 
-            guidance_scale=7.5,
+            guidance_scale=8.0, # Slightly higher to respect the traits more
             generator=latents_generator
         ).images[0]
 
+        # 4. Memory-Buffer Export
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='PNG')
         img_byte_arr.seek(0)
+        
         return img_byte_arr
+    
+    def verify_design(self, generated_image, target_dna: np.ndarray):
+        """
+        Calculates the 'Authenticity Score' of a generated design.
+        """
+        # 1. Convert image to embedding
+        # We use the same CLIP model to see what the AI 'sees' in the result
+        gen_embedding = self.fclip.encode_images([generated_image], batch_size=1)[0]
+        
+        # 2. Calculate Cosine Similarity
+        # Normalize vectors
+        gen_norm = gen_embedding / np.linalg.norm(gen_embedding)
+        target_norm = target_dna / np.linalg.norm(target_dna)
+        
+        # Similarity score (0.0 to 1.0)
+        similarity = np.dot(gen_norm, target_norm)
+        
+        # 3. Interpret the score
+        # > 0.85: Extremely Authentic
+        # > 0.70: Strong Hybrid
+        # < 0.50: Style Hallucination (Discard)
+        return float(similarity)
+
+    def archive_brand_traits(self, images: list):
+        """
+        Interrogates a batch of brand images to find dominant visual traits.
+        """
+        # Define the 'Fashion Vocabulary' the archivist looks for
+        traits_vocabulary = [
+            "quilted texture", "minimalist lines", "avant-garde silhouette",
+            "industrial nylon", "architectural tailoring", "organic curves",
+            "monogram print", "tweed fabric", "distressed leather"
+        ]
+        
+        # Use Fashion-CLIP to rank these traits against the images
+        # This returns the probability of each text trait matching the images
+        text_embeddings = self.fclip.encode_text(traits_vocabulary)
+        image_embeddings = self.fclip.encode_images(images)
+        
+        # Calculate similarity
+        similarity = image_embeddings @ text_embeddings.T
+        avg_scores = similarity.mean(axis=0)
+        
+        # Get the top 3 traits
+        top_indices = avg_scores.argsort()[-3:][::-1]
+        return [traits_vocabulary[i] for i in top_indices]
+    
+    def apply_style_slider(self, dna_vector: np.ndarray, slider_name: str, intensity: float):
+        """
+        Pushes the DNA vector along a specific aesthetic axis.
+        intensity: -1.0 (Opposite) to 1.0 (Full Style)
+        """
+        # Define our library of 'Basis Vectors'
+        aesthetic_library = {
+            "minimalism": ("clean minimalist simple", "ornate maximalist complex"),
+            "utility": ("techwear utility tactical hardware", "formal elegant soft"),
+            "vintage": ("retro vintage 1950s heritage", "modern futuristic sci-fi")
+        }
+
+        if slider_name not in aesthetic_library:
+            return dna_vector
+
+        pos_text, neg_text = aesthetic_library[slider_name]
+        
+        # Encode the two poles
+        with torch.no_grad():
+            pos_v = self.fclip.encode_text([pos_text])[0]
+            neg_v = self.fclip.encode_text([neg_text])[0]
+        
+        # Calculate the Direction Vector
+        direction = pos_v - neg_v
+        direction = direction / np.linalg.norm(direction) # Normalize
+        
+        # Apply the shift to the DNA
+        # new_dna = original + (direction * slider_value)
+        shifted_dna = dna_vector + (direction * intensity)
+        
+        return shifted_dna / np.linalg.norm(shifted_dna) # Re-normalize
 
 # Singleton instance
 brain = StyleBrain()
