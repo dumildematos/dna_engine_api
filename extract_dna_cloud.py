@@ -35,42 +35,40 @@ def patched_encode_images(self, images, batch_size=16):
             image_embeddings.extend(features.detach().cpu().numpy())
     return np.array(image_embeddings)
 
+# --- 2026 SUPREME COMPATIBILITY PATCH: TEXT ENCODING ---
 def patched_encode_text(self, text, batch_size=16):
-    """Aggressively unwraps the model output to find the 512D tensor."""
+    """Fixes AttributeError by unwrapping BaseModelOutputWithPooling for sliders."""
     text_embeddings = []
     self.model.eval()
     
-    for i in tqdm(range(0, len(text), batch_size), desc="Encoding Traits"):
+    if isinstance(text, str):
+        text = [text]
+    
+    for i in range(0, len(text), batch_size):
         batch_text = text[i : i + batch_size]
         inputs = self.preprocess(text=batch_text, return_tensors="pt", padding=True).to(self.model.device)
         
         with torch.no_grad():
             outputs = self.model.get_text_features(**inputs)
             
-            # --- AGGRESSIVE UNWRAPPING ---
-            # We look for the tensor in every possible hiding place
-            if isinstance(outputs, torch.Tensor):
-                features = outputs
-            elif hasattr(outputs, "text_embeds"):
+            # UNWRAP LOGIC: Extract the actual tensor from the Output object
+            if hasattr(outputs, "text_embeds"):
                 features = outputs.text_embeds
             elif hasattr(outputs, "pooler_output"):
                 features = outputs.pooler_output
-            elif isinstance(outputs, (list, tuple)):
-                features = outputs[0]
+            elif isinstance(outputs, torch.Tensor):
+                features = outputs
             else:
-                # Last resort: try to force cast or access the first attribute
-                features = next(iter(outputs.values())) if hasattr(outputs, "values") else outputs
+                features = outputs[0]
 
-            # Now that we (hopefully) have a tensor, normalize it
-            # We use torch.linalg.norm for better compatibility in 2026
+            # Normalize and move to CPU
             norm = features.norm(p=2, dim=-1, keepdim=True)
-            features = features / norm
-            
+            features = features / (norm + 1e-8)
             text_embeddings.extend(features.detach().cpu().numpy())
             
     return np.array(text_embeddings)
 
-# Re-apply the patch
+# Apply patches to the FashionCLIP class
 fc_module.FashionCLIP.encode_text = patched_encode_text
 fc_module.FashionCLIP._load_model = patched_load_model
 fc_module.FashionCLIP.encode_images = patched_encode_images

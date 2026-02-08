@@ -14,7 +14,7 @@ async def lifespan(app: FastAPI):
     # Shutdown: Clean up if necessary
     print("Shutting down Brain...")
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, debug=True)
 
 origins = [
     "http://localhost:4200",  # Angular default

@@ -21,29 +21,57 @@ MODEL_ID = "runwayml/stable-diffusion-v1-5"
 pipe = None
 
 # --- 2026 SUPREME COMPATIBILITY PATCH ---
+# --- 2026 SUPREME COMPATIBILITY PATCHES ---
+
 def patched_load_model(self, name, auth_token=None):
     from transformers import CLIPModel, CLIPProcessor
+    import torch
+    
+    # The fashion-specific weights
     actual_repo = "patrickjohncyh/fashion-clip"
+    # The standard config files needed to satisfy Python 3.13 / Transformers 4.40+
+    processor_repo = "openai/clip-vit-base-patch32"
+    
     print(f"--- Brain: Fetching weights from {actual_repo} ---")
+    
+    # Load Model from Fashion-CLIP
     model = CLIPModel.from_pretrained(actual_repo, token=auth_token, return_dict=True)
-    preprocess = CLIPProcessor.from_pretrained(actual_repo, token=auth_token)
-    return model, preprocess, None
+    
+    # Load Processor from OpenAI (This fixes the OSError / missing .json)
+    preprocess = CLIPProcessor.from_pretrained(processor_repo)
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    
+    return model, preprocess, "stable_2026_hash"
 
 def patched_encode_images(self, images, batch_size=16):
+    """Encodes images and ensures vectors are normalized for DNA breeding."""
     image_embeddings = []
     self.model.eval()
+    
     for i in tqdm(range(0, len(images), batch_size), desc="Brain Encoding"):
         batch_images = images[i : i + batch_size]
         inputs = self.preprocess(images=batch_images, return_tensors="pt").to(self.model.device)
+        
         with torch.no_grad():
             outputs = self.model.get_image_features(**inputs)
+            
+            # Handle the BaseModelOutput object vs raw Tensor
             if not isinstance(outputs, torch.Tensor):
                 features = getattr(outputs, "image_embeds", getattr(outputs, "pooler_output", outputs[0]))
             else:
                 features = outputs
+            
+            # CRITICAL: Normalize vectors so cosine similarity and breeding math work
+            norm = features.norm(p=2, dim=-1, keepdim=True)
+            features = features / (norm + 1e-8)
+            
             image_embeddings.extend(features.detach().cpu().numpy())
+            
     return np.array(image_embeddings)
 
+# Apply the overrides to the library
 fc_module.FashionCLIP._load_model = patched_load_model
 fc_module.FashionCLIP.encode_images = patched_encode_images
 from fashion_clip.fashion_clip import FashionCLIP
@@ -68,14 +96,15 @@ class StyleBrain:
         return blended_vector / norm if norm > 0 else blended_vector
 
     def generate_breeding_map(self, brand_a: str, brand_b: str, ratio: float, filename: str):
-        """Generates a 2D PCA map and saves the breeding path."""
         centroid_dir = "data/centroids"
         dna_vectors = []
         brand_names = []
 
-        # 1. Load all available centroids
+        if not os.path.exists(centroid_dir):
+            return io.BytesIO()
+
         for file in os.listdir(centroid_dir):
-            if file.endswith(".npy"):
+            if file.endswith(".npy") and not file.startswith("trend"):
                 dna_vectors.append(np.load(os.path.join(centroid_dir, file)))
                 brand_names.append(file.replace(".npy", ""))
 
@@ -84,36 +113,28 @@ class StyleBrain:
         coords = pca.fit_transform(data)
         brand_map = dict(zip(brand_names, coords))
 
-        # 2. Create Plot
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.scatter(coords[:, 0], coords[:, 1], c='lightgrey', alpha=0.5, label="Other Brands")
 
-        # 3. Calculate and Plot the Path
         if brand_a in brand_map and brand_b in brand_map:
             start, end = brand_map[brand_a], brand_map[brand_b]
             blend_coord = (1 - ratio) * start + ratio * end
-            
             ax.plot([start[0], end[0]], [start[1], end[1]], 'r--', alpha=0.6, label="Breeding Path")
             ax.scatter(blend_coord[0], blend_coord[1], color='gold', s=200, marker='*', edgecolors='k', label="New DNA")
-            
-            # Label the parents
             ax.annotate(brand_a.upper(), (start[0], start[1]), xytext=(5,5), textcoords='offset points', fontsize=8)
             ax.annotate(brand_b.upper(), (end[0], end[1]), xytext=(5,5), textcoords='offset points', fontsize=8)
 
         ax.set_title(f"Style Space: {brand_a} x {brand_b}")
         ax.legend()
         
-        # 4. Save to Disk
         output_dir = "data/history"
         os.makedirs(output_dir, exist_ok=True)
-        file_path = os.path.join(output_dir, filename)
-        fig.savefig(file_path, bbox_inches='tight')
+        fig.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
 
-        # 5. Return as Buffer for API
         map_buf = io.BytesIO()
         fig.savefig(map_buf, format='png')
         map_buf.seek(0)
-        plt.close(fig) # Memory cleanup
+        plt.close(fig) 
         return map_buf
 
     def load_generator(self):
@@ -124,40 +145,51 @@ class StyleBrain:
             pipe = StableDiffusionPipeline.from_pretrained(
                 MODEL_ID, 
                 torch_dtype=dtype,
-                safety_checker=None if self.device == "cpu" else "default"
+                safety_checker=None
             ).to(self.device)
             print("--- Engine Ready! ---")
         return pipe
 
-    def generate_design(self, bred_dna: np.ndarray, custom_prompt: str = ""):
+    def generate_design(self, bred_dna: np.ndarray, custom_prompt: str = "", layout_type: str = "hero"):
+        """
+        Generates a design based on DNA. 
+        layout_type: 'hero' for the main garment, 'flatlay' for accessory presentation.
+        """
         generator = self.load_generator()
         
         # 1. Deterministic Seed from DNA
-        # This ensures the 'DNA' actually dictates the core structure
         seed = int(np.abs(bred_dna.sum()) * 1000000) % 2**32
         latents_generator = torch.Generator(device=self.device).manual_seed(seed)
         
-        # 2. Archivist Prompt Integration
-        # We combine your high-quality base prompt with the specific heritage traits
-        base_style = "high fashion runway look, avant-garde garment, detailed texture, professional photography, masterpiece"
-        
-        if custom_prompt:
-            # Heritage traits take priority at the front of the prompt
-            final_prompt = f"{custom_prompt}, {base_style}"
+        # 2. Dynamic Layout Styles
+        # 'flatlay' mimics your inspiration image: organized clothes, accessories, beige background.
+        if layout_type == "flatlay":
+            layout_style = (
+                "organized flat lay photography, minimalist knolling composition, "
+                "garment with matching watch and belt, accessories on beige background, "
+                "soft studio lighting, top-down view"
+            )
         else:
-            final_prompt = base_style
-        
-        print(f"🎨 Lab Generating: {final_prompt}")
+            layout_style = (
+                "high fashion masterpiece, avant-garde garment silhouette, "
+                "8k resolution, cinematic lighting, sharp focus, professional photography"
+            )
 
-        # 3. Image Generation
+        # 3. Prompt Construction
+        # Ensure heritage traits (custom_prompt) are at the very front for maximum weight
+        final_prompt = f"{custom_prompt}, {layout_style}" if custom_prompt else layout_style
+        
+        print(f"🎨 Lab Generating [{layout_type}]: {final_prompt}")
+
+        # 4. Image Generation
         image = generator(
             final_prompt, 
-            num_inference_steps=20 if self.device == "cpu" else 25, 
-            guidance_scale=8.0, # Slightly higher to respect the traits more
+            num_inference_steps=25, 
+            guidance_scale=8.5, 
             generator=latents_generator
         ).images[0]
 
-        # 4. Memory-Buffer Export
+        # 5. Export to Buffer
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='PNG')
         img_byte_arr.seek(0)
@@ -165,61 +197,15 @@ class StyleBrain:
         return img_byte_arr
     
     def verify_design(self, generated_image, target_dna: np.ndarray):
-        """
-        Calculates the 'Authenticity Score' of a generated design.
-        """
-        # 1. Convert image to embedding
-        # We use the same CLIP model to see what the AI 'sees' in the result
         gen_embedding = self.fclip.encode_images([generated_image], batch_size=1)[0]
-        
-        # 2. Calculate Cosine Similarity
-        # Normalize vectors
         gen_norm = gen_embedding / np.linalg.norm(gen_embedding)
         target_norm = target_dna / np.linalg.norm(target_dna)
-        
-        # Similarity score (0.0 to 1.0)
-        similarity = np.dot(gen_norm, target_norm)
-        
-        # 3. Interpret the score
-        # > 0.85: Extremely Authentic
-        # > 0.70: Strong Hybrid
-        # < 0.50: Style Hallucination (Discard)
-        return float(similarity)
+        return float(np.dot(gen_norm, target_norm))
 
-    def archive_brand_traits(self, images: list):
-        """
-        Interrogates a batch of brand images to find dominant visual traits.
-        """
-        # Define the 'Fashion Vocabulary' the archivist looks for
-        traits_vocabulary = [
-            "quilted texture", "minimalist lines", "avant-garde silhouette",
-            "industrial nylon", "architectural tailoring", "organic curves",
-            "monogram print", "tweed fabric", "distressed leather"
-        ]
-        
-        # Use Fashion-CLIP to rank these traits against the images
-        # This returns the probability of each text trait matching the images
-        text_embeddings = self.fclip.encode_text(traits_vocabulary)
-        image_embeddings = self.fclip.encode_images(images)
-        
-        # Calculate similarity
-        similarity = image_embeddings @ text_embeddings.T
-        avg_scores = similarity.mean(axis=0)
-        
-        # Get the top 3 traits
-        top_indices = avg_scores.argsort()[-3:][::-1]
-        return [traits_vocabulary[i] for i in top_indices]
-    
     def apply_style_slider(self, dna_vector: np.ndarray, slider_name: str, intensity: float):
-        """
-        Pushes the DNA vector along a specific aesthetic axis.
-        intensity: -1.0 (Opposite) to 1.0 (Full Style)
-        """
-        # Define our library of 'Basis Vectors'
         aesthetic_library = {
-            "minimalism": ("clean minimalist simple", "ornate maximalist complex"),
-            "utility": ("techwear utility tactical hardware", "formal elegant soft"),
-            "vintage": ("retro vintage 1950s heritage", "modern futuristic sci-fi")
+            "minimalism": ("clean minimalist simple luxury silhouette", "ornate maximalist complex busy details"),
+            "vintage_futurism": ("futuristic sci-fi cyber techwear", "vintage retro historical heritage look")
         }
 
         if slider_name not in aesthetic_library:
@@ -227,20 +213,14 @@ class StyleBrain:
 
         pos_text, neg_text = aesthetic_library[slider_name]
         
-        # Encode the two poles
         with torch.no_grad():
-            pos_v = self.fclip.encode_text([pos_text])[0]
-            neg_v = self.fclip.encode_text([neg_text])[0]
+            # FIX: Added batch_size=1 to avoid TypeError
+            pos_v = self.fclip.encode_text([pos_text], batch_size=1)[0]
+            neg_v = self.fclip.encode_text([neg_text], batch_size=1)[0]
         
-        # Calculate the Direction Vector
         direction = pos_v - neg_v
-        direction = direction / np.linalg.norm(direction) # Normalize
-        
-        # Apply the shift to the DNA
-        # new_dna = original + (direction * slider_value)
+        direction = direction / (np.linalg.norm(direction) + 1e-8)
         shifted_dna = dna_vector + (direction * intensity)
-        
-        return shifted_dna / np.linalg.norm(shifted_dna) # Re-normalize
+        return shifted_dna / np.linalg.norm(shifted_dna)
 
-# Singleton instance
 brain = StyleBrain()
